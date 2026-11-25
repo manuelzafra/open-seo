@@ -1,0 +1,20 @@
+# SUMMARY
+# purpose: Open source SEO tool (keyword research, rank tracking, backlinks, site audits, AI visibility) — self-hosted fork of every-app/open-seo
+# live URL: https://open-seo-selfhost.livink.workers.dev (worker name "open-seo-selfhost", LIVINK account subdomain "livink") — pendiente de verificar tras el primer `openseo-deploy`
+# entry: deploy/alchemy/alchemy.run.ts (Alchemy/Cloudflare stack: Workers "open-seo-selfhost" + "open-seo-selfhost-audit", D1, R2, 2x KV, Zero Trust Access app)
+# deploy command: `openseo-deploy` (wrapper in ~/bin, mints a scoped Cloudflare API token and runs `pnpm deploy:selfhost --yes --profile openseo-env`) — interactive `pnpm deploy:selfhost --yes` also works once the "default" alchemy profile has the access:write OAuth scope
+# secrets: .env.selfhost (repo root, gitignored) — DATAFORSEO_API_KEY, AUTH_MODE=cloudflare_access, ACCESS_ALLOWED_EMAILS; deploy token CLOUDFLARE_API_TOKEN_OPENSEO in ~/.livink_secrets/.env
+# DB: Cloudflare D1 "open-seo-db-selfhost" + R2 bucket "open-seo-r2-selfhost" + KV "open-seo-kv-selfhost" / "open-seo-oauth-kv-selfhost" (all LIVINK account, provisioned by the deploy)
+# health check: https://open-seo-selfhost.livink.workers.dev/api/health (runtime config + DB status; does not trigger telemetry)
+
+function: "SEO tool self-hosted (keyword research, rank tracking, competitor insights, backlinks, site audits, AI visibility) — self-host fork of every-app/open-seo, used via web UI and MCP"
+hosting: "Cloudflare Workers (LIVINK account), Alchemy/IaC deploy, self-host stage"
+tech_stack:
+  - "TypeScript / Vite / React"
+  - "Cloudflare Workers + Durable Objects + Workflows"
+  - "Cloudflare D1 (SQLite) + R2 + KV"
+  - "Alchemy (IaC, state store on the same CF account)"
+  - "Cloudflare Access (Zero Trust) for auth — AUTH_MODE=cloudflare_access, no app-level accounts"
+  - "DataForSEO API (SEO data, billed directly to Manuel)"
+notes: "Engram #3417. Protected by Cloudflare Access (team shiny-fire-27ea, allow manuel@livink.es only, OTP login) instead of the app's own password accounts, per standing rule (CF Access Zero Trust, never auth propia). First deploy needs the 'default' alchemy OAuth profile to carry the access:write scope (it doesn't by default — `pnpm alchemy login --configure` only grants it if explicitly customized); openseo-deploy works around that with a separately-scoped Cloudflare API token instead of re-running the interactive OAuth login. DATAFORSEO_API_KEY is a placeholder until manuel runs `openseo-set-dataforseo-key`. MCP clients need 'Managed OAuth' turned on by hand in the Cloudflare Access application (Zero Trust dashboard) before `claude mcp add` can authenticate."
+last_review: '2026-11-25'
