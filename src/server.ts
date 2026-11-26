@@ -11,6 +11,11 @@ import { SamSessionRepository } from "@/server/features/sam/SamSessionRepository
 import { runScheduledRankChecks } from "@/server/features/rank-tracking/services/scheduledRankChecks";
 import { reconcileStaleAudits } from "@/server/features/audit/services/auditReconciler";
 import { sendFirstAuditEmails } from "@/server/features/audit/services/firstAuditEmails";
+import {
+  OAUTH_GC_LAST_RUN_KV_KEY,
+  shouldRunDailyOAuthGc,
+  utcDateString,
+} from "@/server/lib/oauthGcSchedule";
 import { getOrCreateOrganizationCustomer } from "@/server/billing/subscription";
 import { isHostedServerAuthMode } from "@/server/lib/runtime-env";
 import {
@@ -253,8 +258,37 @@ export { LocalRankWorkflow } from "./server/workflows/LocalRankWorkflow";
 // Durable Object class for the SAM in-app agent (Agents SDK).
 export { SamChatAgent } from "./server/features/sam/SamChatAgent";
 
-// Daily OAuth KV garbage collection; must match a trigger in wrangler.jsonc.
-const MCP_OAUTH_PURGE_CRON = "17 3 * * *";
+async function runDailyOAuthGc(env: Env) {
+  const authMode = getAuthMode(env.AUTH_MODE);
+  // Only the modes with their own accounts run the OAuth provider (and
+  // have OAUTH_KV bound).
+  if (usesBetterAuth(authMode)) {
+    const result = await openSeoOAuthProvider.purgeExpiredData(
+      env as OpenSeoOAuthEnv,
+    );
+    console.log("[mcp-oauth] purged expired OAuth data", result);
+  }
+  if (isHostedAuthMode(authMode)) {
+    // Daily referral-sale sweep: catches paid Autumn invoices the
+    // billing.updated webhook path misses (renewals, one-time top-ups).
+    try {
+      await sweepDubReferredOrganizations();
+    } catch (err) {
+      console.error("[cron] Dub referral sale sweep failed:", err);
+    }
+
+    // Daily cleanup of Google grants no project uses any more, as the
+    // hosted privacy policy promises.
+    try {
+      const { purgeUnusedGoogleData } =
+        await import("@/server/features/google/googleDataRetention");
+      const purged = await withPgClient(() => purgeUnusedGoogleData());
+      console.log("[retention] purged unused Google data", purged);
+    } catch (err) {
+      console.error("[cron] Google data cleanup failed:", err);
+    }
+  }
+}
 
 export default {
   fetch,
@@ -265,37 +299,21 @@ export default {
   ) {
     // A legacy Docker import owns the database until it finishes.
     if (hasOperatorSecret() && (await isLegacyImportActive())) return;
-    if (controller.cron === MCP_OAUTH_PURGE_CRON) {
-      const authMode = getAuthMode(env.AUTH_MODE);
-      // Only the modes with their own accounts run the OAuth provider (and
-      // have OAUTH_KV bound).
-      if (usesBetterAuth(authMode)) {
-        const result = await openSeoOAuthProvider.purgeExpiredData(
-          env as OpenSeoOAuthEnv,
-        );
-        console.log("[mcp-oauth] purged expired OAuth data", result);
-      }
-      if (isHostedAuthMode(authMode)) {
-        // Daily referral-sale sweep: catches paid Autumn invoices the
-        // billing.updated webhook path misses (renewals, one-time top-ups).
-        try {
-          await sweepDubReferredOrganizations();
-        } catch (err) {
-          console.error("[cron] Dub referral sale sweep failed:", err);
-        }
 
-        // Daily cleanup of Google grants no project uses any more, as the
-        // hosted privacy policy promises.
-        try {
-          const { purgeUnusedGoogleData } =
-            await import("@/server/features/google/googleDataRetention");
-          const purged = await withPgClient(() => purgeUnusedGoogleData());
-          console.log("[retention] purged unused Google data", purged);
-        } catch (err) {
-          console.error("[cron] Google data cleanup failed:", err);
-        }
+    // OAUTH_KV is provisioned in every mode (see alchemy.run.ts), so the
+    // last-run marker is always available regardless of auth mode.
+    let gcError: unknown;
+    try {
+      const oauthKv = (env as OpenSeoOAuthEnv).OAUTH_KV;
+      const now = new Date(controller.scheduledTime);
+      const lastRun = await oauthKv.get(OAUTH_GC_LAST_RUN_KV_KEY);
+      if (shouldRunDailyOAuthGc(now, lastRun)) {
+        await oauthKv.put(OAUTH_GC_LAST_RUN_KV_KEY, utcDateString(now));
+        await runDailyOAuthGc(env);
       }
-      return;
+    } catch (err) {
+      gcError = err;
+      console.error("[cron] Daily OAuth GC failed:", err);
     }
 
     // Watchdog first: reconcile audits stuck in "running" whose workflow died
@@ -326,5 +344,6 @@ export default {
     for (const result of checks)
       if (result.status === "rejected") throw result.reason;
     if (watchdogError) throw watchdogError;
+    if (gcError) throw gcError;
   },
 };
